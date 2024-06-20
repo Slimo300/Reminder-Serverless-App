@@ -68,6 +68,25 @@ Resources:
     Type: AWS::SNS::Topic
     Properties:
       DisplayName: MySnsTopic
+  
+  ### Lambda Layers
+  JwtLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: JwtLayer
+      Description: Layer containing jsonwebtoken library
+      ContentUri: layers/jsonwebtoken/nodejs
+      CompatibleRuntimes:
+        - nodejs18.x
+
+  UuidLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: JwtLayer
+      Description: Layer containing jsonwebtoken library
+      ContentUri: layers/uuid/nodejs
+      CompatibleRuntimes:
+        - nodejs18.x
 
   ### Lambda Functions ###
   AlarmCreator:
