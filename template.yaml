@@ -1,0 +1,259 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Resources:
+  ### Cognito User Pool ###
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: MyUserPool
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - phone_number
+      MfaConfiguration: ON
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+      Schema:
+        - Name: subscription_arn
+          AttributeDataType: String
+          Mutable: true
+      LambdaConfig:
+        PreSignUp: !GetAtt RegistrationVerifier.Arn
+        PostConfirmation: !GetAtt UserSubscriber.Arn
+        CustomMessage: !GetAtt PhoneNumberModifier.Arn
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_CODE
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: MyUserPoolClient
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+
+  CognitoAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: CognitoAuthorizer
+      IdentitySource: method.request.header.Authorization
+      ProviderARNs:
+        - !Sub arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPool}
+
+  ### DynamoDB Table ###
+  AlarmsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AlarmsTable
+      AttributeDefinitions:
+        - AttributeName: userID
+          AttributeType: S
+        - AttributeName: eventID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: userID
+          KeyType: HASH
+        - AttributeName: eventID
+          KeyType: RANGE
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  ### SNS Topic ###
+  SnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: MySnsTopic
+
+  ### Lambda Functions ###
+  AlarmCreator:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/alarmCreator.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref AlarmsTable
+          ROLE_ARN: !Ref SchedulerRoleArn
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AlarmsTable
+        - Statement:
+            Effect: Allow
+            Action: 
+              - 'events:CreateSchedule'
+            Resource: '*'
+      Events:
+        CreateAlarm:
+          Type: Api
+          Properties:
+            Path: /create-alarm
+            Method: post
+            RestApiId: !Ref ApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
+            Cors: "'*'"
+
+  AlarmsGetter:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/alarmsGetter.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref AlarmsTable
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref AlarmsTable
+      Events:
+        GetAlarms:
+          Type: Api
+          Properties:
+            Path: /get-alarms
+            Method: get
+            RestApiId: !Ref ApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
+            Cors: "'*'"
+
+  AlarmDeleter:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/alarmDeleter.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref AlarmsTable
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AlarmsTable
+        - Statement:
+            Effect: Allow
+            Action: 
+              - 'events:DeleteSchedule'
+            Resource: '*'
+      Events:
+        DeleteAlarm:
+          Type: Api
+          Properties:
+            Path: /delete-alarm
+            Method: post
+            RestApiId: !Ref ApiGateway
+            Auth:
+              Authorizer: CognitoAuthorizer
+            Cors: "'*'"
+
+  RegistrationVerifier:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/registrationVerifier.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          USER_POOL_ID: !Ref UserPool
+      Policies:
+        - CognitoReadPolicy:
+            UserPoolId: !Ref UserPool
+
+  UserSubscriber:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/userSubscriber.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !Ref SnsTopic
+        - CognitoCrudPolicy:
+            UserPoolId: !Ref UserPool
+
+  PhoneNumberModifier:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/phoneNumberModifier.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopic
+          USER_POOL_ID: !Ref UserPool
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !Ref SnsTopic
+        - CognitoCrudPolicy:
+            UserPoolId: !Ref UserPool
+
+  AlarmExecutor:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: src/alarmExecutor.handler
+      Runtime: nodejs18.x
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref SnsTopic
+      Policies:
+        - SNSPublishMessagePolicy:
+            TopicName: !Ref SnsTopic
+
+  ### API Gateway ###
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: ServerlessApi
+      Cors:
+        AllowMethods: "'OPTIONS,POST,GET'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+        AllowOrigin: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  ### IAM Roles ###
+  SchedulerRoleArn:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - events.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Policies:
+        - PolicyName: SchedulerRolePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: '*'
+
+  ### S3 Bucket for Frontend ###
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: my-frontend-bucket
+      WebsiteConfiguration:
+        IndexDocument: index.html
+
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: !Sub 'arn:aws:s3:::${FrontendBucket}/*'
